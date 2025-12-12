@@ -1,0 +1,146 @@
+# RepoBox - Docker Compose Configuration
+# Defines all services: Memgraph, MongoDB, Dragonfly, PostgreSQL, Superset, Backend API
+
+services:
+  # Graph Database - Store relationships between repos, users, languages
+  memgraph:
+    image: memgraph/memgraph-platform:2.14.1-memgraph2.14.1-lab2.11.1-mage1.14.1
+    container_name: repo-memgraph
+    ports:
+      - "7687:7687"   # Bolt protocol
+      - "3002:3000"   # Memgraph Lab UI - http://localhost:3002
+      - "7444:7444"   # Monitoring
+    volumes:
+      - memgraph_data:/var/lib/memgraph
+    networks:
+      - github-net
+    restart: unless-stopped
+
+  # Document Database - Store complete repository data as JSON
+  mongodb:
+    image: mongo:7.0
+    container_name: repo-mongodb
+    ports:
+      - "27018:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=repobox
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - github-net
+    restart: unless-stopped
+
+  # MongoDB Web UI
+  mongo-express:
+    image: mongo-express:latest
+    container_name: repo-mongo-express
+    ports:
+      - "8083:8081"   # http://localhost:8083
+    environment:
+      - ME_CONFIG_MONGODB_URL=mongodb://mongodb:27017/
+      - ME_CONFIG_BASICAUTH=false
+    networks:
+      - github-net
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+
+  # SQL Database - For Superset visualization
+  postgres:
+    image: postgres:16
+    container_name: repo-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_DB=repobox
+      - POSTGRES_USER=repobox
+      - POSTGRES_PASSWORD=repobox123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - github-net
+    restart: unless-stopped
+
+  # Cache - Ultra-fast data access
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.14.5
+    container_name: repo-dragonfly
+    ports:
+      - "6379:6379"
+    volumes:
+      - dragonfly_data:/data
+    command:
+      - dragonfly
+      - --logtostderr
+      - --dir=/data
+      - --snapshot_cron=*/30 * * * *
+      - --cache_mode=true
+    ulimits:
+      memlock: -1
+    networks:
+      - github-net
+    restart: unless-stopped
+
+  # Superset - Dashboards and visualizations
+  superset:
+    build:
+      context: ./superset
+      dockerfile: Dockerfile
+    container_name: repobox-superset
+    ports:
+      - "8088:8088"   # http://localhost:8088 (admin/admin)
+    environment:
+      - SUPERSET_SECRET_KEY=repobox_secret_key_change_in_production
+    volumes:
+      - superset_data:/app/superset_home
+    networks:
+      - github-net
+    depends_on:
+      - mongodb
+      - backend
+    restart: unless-stopped
+
+  # Backend API - FastAPI REST endpoints
+  backend:
+    image: python:3.11-slim
+    container_name: github-backend
+    working_dir: /app
+    command: bash -c "
+      pip install --no-cache-dir fastapi uvicorn gqlalchemy pymongo redis requests python-dotenv &&
+      uvicorn api:app --host 0.0.0.0 --port 5000 --reload
+      "
+    ports:
+      - "5000:5000"   # http://localhost:5000/docs
+    volumes:
+      - ./backend:/app
+    environment:
+      - MEMGRAPH_HOST=memgraph
+      - MEMGRAPH_PORT=7687
+      - MONGODB_HOST=mongodb
+      - MONGODB_PORT=27017
+      - MONGODB_DB=repobox
+      - DRAGONFLY_HOST=dragonfly
+      - DRAGONFLY_PORT=6379
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+    networks:
+      - github-net
+    depends_on:
+      - memgraph
+      - mongodb
+      - dragonfly
+    restart: unless-stopped
+
+# Network for all services
+networks:
+  github-net:
+    driver: bridge
+
+# Persistent storage
+volumes:
+  memgraph_data:
+  mongodb_data:
+  dragonfly_data:
+  superset_data:
+  postgres_data:
+
+
